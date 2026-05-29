@@ -24,9 +24,10 @@ async function bootstrap() {
   // CORS: in production restrict to app bundle IDs + admin domain (spec §15.2).
   app.enableCors({ origin: true, credentials: true });
 
-  const port = config.get<number>('PORT', 3000);
-  await app.listen(port);
-  Logger.log(`Ziganya API listening on http://localhost:${port}/${apiPrefix}`, 'Bootstrap');
+  // Render/most PaaS inject PORT and require binding to 0.0.0.0.
+  const port = Number(config.get('PORT', 3000));
+  await app.listen(port, '0.0.0.0');
+  Logger.log(`Ziganya API listening on :${port}/${apiPrefix}`, 'Bootstrap');
 }
 
 bootstrap();
