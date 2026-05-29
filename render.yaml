@@ -1,0 +1,55 @@
+# Render Blueprint for the Ziganya NestJS API.
+# Deploy: render.com → New → Blueprint → connect this repo → Apply.
+# Secrets (sync:false) are filled in the Render dashboard, not in git.
+services:
+  - type: web
+    name: ziganya-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    region: oregon
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /api/v1/health
+    buildCommand: npm install --include=dev && npx prisma generate && npm run build
+    startCommand: npx prisma migrate deploy && node dist/main.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_PREFIX
+        value: api/v1
+      - key: JWT_ACCESS_EXPIRES_IN
+        value: "900"
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: "2592000"
+      - key: BCRYPT_COST
+        value: "12"
+      - key: SUPABASE_STORAGE_BUCKET
+        value: ziganya-media
+      - key: JWT_SECRET
+        generateValue: true
+      # ── Secrets: paste real values in the Render dashboard ──
+      - key: DATABASE_URL          # Supabase transaction pooler (6543, ?pgbouncer=true)
+        sync: false
+      - key: DIRECT_URL            # Supabase direct connection (5432)
+        sync: false
+      - key: REDIS_URL             # Upstash redis:// URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY  # paste with literal \n escapes, in quotes
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false

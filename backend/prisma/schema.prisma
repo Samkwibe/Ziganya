@@ -1,0 +1,289 @@
+// Ziganya database schema — mirrors Project Specification §6 (ERD).
+// Conventions: UUID primary keys (gen_random_uuid()), NUMERIC(12,2) for money,
+// TIMESTAMPTZ (UTC) for timestamps, indexes on FKs + frequent WHERE columns.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Runtime: Supabase transaction pooler (pgbouncer) — DATABASE_URL ends with ?pgbouncer=true.
+  url       = env("DATABASE_URL")
+  // Migrations: a DIRECT (non-pooled) connection. pgbouncer transaction mode
+  // cannot run Prisma migrations. Falls back to DATABASE_URL for local Docker.
+  directUrl = env("DIRECT_URL")
+}
+
+// ── Enums ────────────────────────────────────────────────────
+enum Role {
+  member
+  admin
+  superadmin
+}
+
+enum UserStatus {
+  active
+  suspended
+  pending
+  removed
+}
+
+enum ChurnRisk {
+  low
+  medium
+  high
+}
+
+enum ContributionStatus {
+  pending
+  verified
+  missed
+  rejected
+}
+
+enum LoanStatus {
+  pending
+  approved
+  rejected
+  active
+  paid
+  overdue
+}
+
+enum MessageType {
+  text
+  voice
+  photo
+  document
+  payment_card
+  system
+}
+
+enum MessageSource {
+  in_app
+  whatsapp
+}
+
+enum MessageStatus {
+  sent
+  delivered
+  read
+  failed
+}
+
+enum ConversationType {
+  direct
+  group
+  admin
+  ai
+}
+
+enum NotificationType {
+  contribution_reminder
+  loan_due
+  overdue
+  announcement
+  payment_confirmed
+  health_alert
+}
+
+enum NotificationChannel {
+  push
+  sms
+  email
+  whatsapp
+}
+
+// ── users ────────────────────────────────────────────────────
+model User {
+  id              String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fullName        String      @map("full_name") @db.VarChar(200)
+  email           String      @unique @db.VarChar(320)
+  phoneNumber     String      @unique @map("phone_number") @db.VarChar(30)
+  passwordHash    String      @map("password_hash") @db.Text
+  profileImageUrl String?     @map("profile_image_url") @db.Text
+  role            Role        @default(member)
+  status          UserStatus  @default(pending)
+  language        String      @default("en") @db.VarChar(5)
+  countryCode     String      @map("country_code") @db.VarChar(5)
+  healthScore     Int?        @map("health_score") @db.SmallInt
+  churnRisk       ChurnRisk?  @map("churn_risk")
+  totalInvested   Decimal     @default(0) @map("total_invested") @db.Decimal(12, 2)
+  totalBorrowed   Decimal     @default(0) @map("total_borrowed") @db.Decimal(12, 2)
+  whatsappNumber  String?     @map("whatsapp_number") @db.VarChar(30)
+  mfaSecret       String?     @map("mfa_secret") @db.Text
+  autoPayEnabled  Boolean     @default(false) @map("auto_pay_enabled")
+  biometricEnabled Boolean    @default(false) @map("biometric_enabled")
+  deletedAt       DateTime?   @map("deleted_at") @db.Timestamptz(6)
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  contributions       Contribution[] @relation("UserContributions")
+  verifiedContributions Contribution[] @relation("ContributionVerifier")
+  loans               Loan[]         @relation("UserLoans")
+  approvedLoans       Loan[]         @relation("LoanApprover")
+  loanPayments        LoanPayment[]
+  messages            Message[]
+  notifications       Notification[]
+  auditActions        AuditLog[]     @relation("AuditActor")
+  auditTargets        AuditLog[]     @relation("AuditTarget")
+
+  @@index([email])
+  @@index([phoneNumber])
+  @@index([status])
+  @@map("users")
+}
+
+// ── contributions ────────────────────────────────────────────
+model Contribution {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String             @map("user_id") @db.Uuid
+  weekStartDate     DateTime           @map("week_start_date") @db.Date
+  amount            Decimal            @default(50.00) @db.Decimal(12, 2)
+  status            ContributionStatus @default(pending)
+  clockInTime       DateTime?          @map("clock_in_time") @db.Timestamptz(6)
+  paymentMethod     String?            @map("payment_method") @db.VarChar(50)
+  paymentReference  String?            @map("payment_reference") @db.VarChar(200)
+  verifiedByAdminId String?            @map("verified_by_admin_id") @db.Uuid
+  verifiedAt        DateTime?          @map("verified_at") @db.Timestamptz(6)
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user            User  @relation("UserContributions", fields: [userId], references: [id])
+  verifiedByAdmin User? @relation("ContributionVerifier", fields: [verifiedByAdminId], references: [id])
+
+  // Enforces one clock-in per member per week (spec §2.2 / §10.1).
+  @@unique([userId, weekStartDate], name: "uq_user_week")
+  @@index([userId])
+  @@index([weekStartDate])
+  @@index([status])
+  @@map("contributions")
+}
+
+// ── loans ────────────────────────────────────────────────────
+model Loan {
+  id                    String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId                String     @map("user_id") @db.Uuid
+  amountBorrowed        Decimal    @map("amount_borrowed") @db.Decimal(12, 2)
+  interestRate          Decimal    @map("interest_rate") @db.Decimal(5, 4)
+  interestAmount        Decimal    @map("interest_amount") @db.Decimal(12, 2)
+  totalDue              Decimal    @map("total_due") @db.Decimal(12, 2)
+  amountRepaid          Decimal    @default(0) @map("amount_repaid") @db.Decimal(12, 2)
+  remainingBalance      Decimal    @map("remaining_balance") @db.Decimal(12, 2)
+  dueDate               DateTime   @map("due_date") @db.Date
+  status                LoanStatus @default(pending)
+  purpose               String?    @db.Text
+  approvedByAdminId     String?    @map("approved_by_admin_id") @db.Uuid
+  approvedAt            DateTime?  @map("approved_at") @db.Timestamptz(6)
+  disbursementMethod    String?    @map("disbursement_method") @db.VarChar(50)
+  disbursementReference String?    @map("disbursement_reference") @db.VarChar(200)
+  deletedAt             DateTime?  @map("deleted_at") @db.Timestamptz(6)
+  createdAt             DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user            User          @relation("UserLoans", fields: [userId], references: [id])
+  approvedByAdmin User?         @relation("LoanApprover", fields: [approvedByAdminId], references: [id])
+  payments        LoanPayment[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([dueDate])
+  @@map("loans")
+}
+
+// ── loan_payments ────────────────────────────────────────────
+model LoanPayment {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  loanId               String   @map("loan_id") @db.Uuid
+  userId               String   @map("user_id") @db.Uuid
+  amountPaid           Decimal  @map("amount_paid") @db.Decimal(12, 2)
+  paymentMethod        String   @map("payment_method") @db.VarChar(50)
+  paymentReference     String?  @map("payment_reference") @db.VarChar(200)
+  remainingBalanceAfter Decimal @map("remaining_balance_after") @db.Decimal(12, 2)
+  paidAt               DateTime @default(now()) @map("paid_at") @db.Timestamptz(6)
+
+  loan Loan @relation(fields: [loanId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([loanId])
+  @@index([userId])
+  @@map("loan_payments")
+}
+
+// ── conversations ────────────────────────────────────────────
+model Conversation {
+  id        String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type      ConversationType @default(direct)
+  title     String?          @db.VarChar(200)
+  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  messages Message[]
+
+  @@map("conversations")
+}
+
+// ── messages ─────────────────────────────────────────────────
+model Message {
+  id                 String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId     String        @map("conversation_id") @db.Uuid
+  senderId           String        @map("sender_id") @db.Uuid
+  messageType        MessageType   @default(text) @map("message_type")
+  content            String?       @db.Text
+  mediaUrl           String?       @map("media_url") @db.Text
+  durationSeconds    Int?          @map("duration_seconds") @db.SmallInt
+  whatsappMessageSid String?       @map("whatsapp_message_sid") @db.VarChar(200)
+  source             MessageSource @default(in_app)
+  status             MessageStatus @default(sent)
+  replyToMessageId   String?       @map("reply_to_message_id") @db.Uuid
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  sender       User         @relation(fields: [senderId], references: [id])
+  replyTo      Message?     @relation("MessageReplies", fields: [replyToMessageId], references: [id])
+  replies      Message[]    @relation("MessageReplies")
+
+  @@index([conversationId])
+  @@index([senderId])
+  @@map("messages")
+}
+
+// ── notifications ────────────────────────────────────────────
+model Notification {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String              @map("user_id") @db.Uuid
+  title       String              @db.VarChar(200)
+  body        String              @db.Text
+  type        NotificationType
+  channel     NotificationChannel
+  readStatus  Boolean             @default(false) @map("read_status")
+  scheduledAt DateTime?           @map("scheduled_at") @db.Timestamptz(6)
+  sentAt      DateTime?           @map("sent_at") @db.Timestamptz(6)
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("notifications")
+}
+
+// ── audit_logs ───────────────────────────────────────────────
+// Tamper-evident hash chain (spec §5.2 / §15.3): previous_hash links entries.
+model AuditLog {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorId          String   @map("actor_id") @db.Uuid
+  action           String   @db.VarChar(100)
+  targetUserId     String?  @map("target_user_id") @db.Uuid
+  targetResourceId String?  @map("target_resource_id") @db.Uuid
+  details          Json?
+  previousHash     String?  @map("previous_hash") @db.VarChar(64)
+  hash             String?  @db.VarChar(64)
+  ipAddress        String?  @map("ip_address") @db.Inet
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  actor      User  @relation("AuditActor", fields: [actorId], references: [id])
+  targetUser User? @relation("AuditTarget", fields: [targetUserId], references: [id])
+
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
