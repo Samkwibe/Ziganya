@@ -20,17 +20,24 @@ import {
   ResetPasswordDto,
 } from './dto/auth.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
+import twilio from 'twilio';
+import { Logger } from '@nestjs/common';
 
 const MAX_LOGIN_ATTEMPTS = 5; // spec §15.1
 
+
+
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
-  ) {}
+  ) { }
+
 
   async register(dto: RegisterDto) {
     const email = dto.email.toLowerCase();
@@ -156,10 +163,15 @@ export class AuthService {
   }
 
   // ── helpers ──────────────────────────────────────────────
-  /** Single signing secret (spec: JWT_SECRET). Falls back to dev default. */
+  /** Single signing secret (spec: JWT_SECRET). */
   private jwtSecret(): string {
-    return this.config.get<string>('JWT_SECRET', 'dev_access_secret_change_me');
+    const jwtSecret = this.config.get<string>('JWT_SECRET');
+    if (!jwtSecret) {
+      throw new Error('JWT_SECRET environment variable is required');
+    }
+    return jwtSecret;
   }
+
 
   private async issueTokens(user: User) {
     // Env values arrive as strings; coerce so jsonwebtoken treats them as
@@ -185,9 +197,47 @@ export class AuthService {
   private async issueOtp(identifier: string): Promise<string> {
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     await this.redis.setOtp(identifier, code, 120); // 2-minute expiry (spec §17.1)
-    // TODO: dispatch via Twilio Verify (SMS/voice/WhatsApp) once integrated.
+    await this.sendOtp(identifier);
     return code;
   }
+
+  private getTwilioClient() {
+    // Twilio is optional for dev; production requires TWILIO_* env vars.
+    return twilio(
+      this.config.get('TWILIO_ACCOUNT_SID'),
+      this.config.get('TWILIO_AUTH_TOKEN'),
+    );
+  }
+
+  async sendOtp(phoneNumber: string): Promise<void> {
+    const serviceId = this.config.get('TWILIO_VERIFY_SERVICE_SID');
+    if (!serviceId) {
+      // Dev mode: OTP is already stored in Redis and optionally returned via devOtp.
+      return;
+    }
+
+
+    await this.getTwilioClient()
+      .verify.v2
+      .services(serviceId)
+      .verifications.create({ to: phoneNumber, channel: 'sms' });
+  }
+
+  private async checkOtp(phoneNumber: string, code: string): Promise<boolean> {
+    const serviceId = this.config.get('TWILIO_VERIFY_SERVICE_SID');
+    if (!serviceId) {
+      const stored = await this.redis.consumeOtp(`dev:${phoneNumber}`, code);
+      return stored;
+    }
+
+    const result = await this.getTwilioClient()
+      .verify.v2
+      .services(serviceId)
+      .verificationChecks.create({ to: phoneNumber, code });
+
+    return result.status === 'approved';
+  }
+
 
   /** Only expose the OTP in non-production so the mobile client can auto-fill in dev. */
   private devOtp(code: string): string | undefined {
